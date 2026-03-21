@@ -532,11 +532,8 @@ def build_cross_entropy_heatmap(result: EntropyResult) -> go.Figure:
         z=z_vals,
         colorscale="RdYlGn_r",   # verde = bassa entropia (più ordine), rosso = alta
         colorbar=dict(
-            title="H (bit)",
-            titlefont=dict(color=C["grey"], size=10),
+            title=dict(text="H (bit)", font=dict(color=C["grey"], size=10)),
             tickfont=dict(color=C["text"], size=9),
-            len=0.5,
-            y=0.22,
         ),
         hovertemplate="Anno: %{y}<br>Mese: %{x}<br>H̄: %{z:.3f}<extra></extra>",
         name="H Shannon",
