@@ -155,25 +155,35 @@ if not run_analysis:
 ticker_label = get_label(eodhd_ticker)
 
 # ── Fetch dati ───────────────────────────────────────────────
-# to_date calcolato FUORI dalla funzione cachata: entra nella chiave della cache
-# e forza un fetch fresco ogni volta che la data corrente cambia.
+# EODHD tronca le risposte a ~19.000 record: non passiamo from_date all'API
+# ma scarichiamo l'intera storia e filtriamo lato Python.
+# to_date è esplicito nella firma (chiave cache) → dati sempre aggiornati.
 today_str = pd.Timestamp.today().strftime("%Y-%m-%d")
 
 with st.spinner(f"Scaricamento dati per **{eodhd_ticker}** da EODHD..."):
     try:
-        df_raw = fetch_ohlcv(
+        df_full = fetch_ohlcv(
             ticker=eodhd_ticker,
-            from_date=str(start_date),
             to_date=today_str,
         )
     except Exception as e:
         st.error(f"❌ Errore nel download dei dati: {e}")
         st.stop()
 
-if df_raw.empty:
+if df_full.empty:
     st.error(
         f"Nessun dato trovato per **{eodhd_ticker}**. "
         "Verifica il ticker (formato: SYMBOL.EXCHANGE) e le date."
+    )
+    st.stop()
+
+# Filtro per start_date scelto dall'utente (lato Python, non API)
+df_raw = df_full[df_full.index >= pd.Timestamp(start_date)]
+
+if df_raw.empty:
+    st.error(
+        f"Nessun dato trovato per **{eodhd_ticker}** a partire dal {start_date}. "
+        "Prova una data di partenza più recente."
     )
     st.stop()
 
