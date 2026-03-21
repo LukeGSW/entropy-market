@@ -258,13 +258,11 @@ def build_features(
     # ── 4. Permutation Entropy rolling ──────────────────────────
     pe = permutation_entropy_series(log_ret, order=pe_order, window=PE_WINDOW)
 
-    # ── 5. Forward returns cumulativi ────────────────────────────
-    # Shift negativo: il rendimento dei prossimi N giorni (futuro)
-    fwd_series = {}
-    for label, days in FORWARD_PERIODS.items():
-        fwd_series[f"fwd_{label}"] = log_ret.rolling(days).sum().shift(-days) * 100
-
-    # ── 6. Assembla feature DataFrame ───────────────────────────
+    # ── 5. Assembla feature DataFrame (solo feature entropiche) ──
+    # IMPORTANTE: i forward return NON entrano in questo DataFrame.
+    # shift(-N) renderebbe NaN le ultime N righe → dropna taglierebbe
+    # l'ultimo anno di dati (12M = 252 giorni ≈ 1 anno).
+    # Le feature entropiche arrivano fino all'ultima candela disponibile.
     feat = pd.DataFrame({
         "close":        close,
         "log_ret":      log_ret,
@@ -274,20 +272,21 @@ def build_features(
         "shannon_vol":  sh_vol,
         "shannon_skew": sh_skew,
         "perm_entropy": pe,
-        **fwd_series,
     })
 
-    feat = feat.dropna()
+    # Dropna solo sulle colonne entropiche (rimuove warm-up iniziale)
+    feat = feat.dropna(subset=["shannon_ret", "perm_entropy"])
     n_feat = len(feat)
     log_lines.append(f"Feature complete: {n_feat:,} righe ({n_raw - n_feat} NaN rimossi)")
+    log_lines.append(f"Ultima candela: {feat.index[-1].date()}")
 
-    # ── 7. Soglie regime (tertili di shannon_ret) ────────────────
+    # ── 6. Soglie regime (tertili di shannon_ret) ────────────────
     regime_p33 = float(feat["shannon_ret"].quantile(REGIME_P_LOW))
     regime_p67 = float(feat["shannon_ret"].quantile(REGIME_P_HIGH))
     pe_p33     = float(feat["perm_entropy"].quantile(REGIME_P_LOW))
     pe_p67     = float(feat["perm_entropy"].quantile(REGIME_P_HIGH))
 
-    # ── 8. Etichette regime ──────────────────────────────────────
+    # ── 7. Etichette regime ──────────────────────────────────────
     def _assign_regime(val: float) -> str:
         if val <= regime_p33:
             return "Bassa"
@@ -297,13 +296,27 @@ def build_features(
 
     feat["regime"] = feat["shannon_ret"].apply(_assign_regime)
 
+    # ── 8. Forward returns su DataFrame separato (Studio 3 e 4) ──
+    # shift(-N) crea NaN nelle ultime N righe: accettabile qui perché
+    # feat_fwd serve solo per statistiche storiche, non per i grafici
+    # di serie temporale. Le righe recenti con NaN vengono escluse
+    # automaticamente nelle analisi successive tramite dropna() locale.
+    fwd_series = {}
+    for label, days in FORWARD_PERIODS.items():
+        fwd_series[f"fwd_{label}"] = log_ret.rolling(days).sum().shift(-days) * 100
+
+    feat_fwd = feat.copy()
+    for col, series in fwd_series.items():
+        feat_fwd[col] = series
+
     # ── 9. Forward returns medi per regime (Studio 3) ────────────
     rows = []
     for periodo, days in FORWARD_PERIODS.items():
         col = f"fwd_{periodo}"
+        valid = feat_fwd[["regime", col]].dropna()
         for regime in ["Bassa", "Media", "Alta"]:
-            mask = feat["regime"] == regime
-            mean_ret = float(feat.loc[mask, col].mean())
+            mask = valid["regime"] == regime
+            mean_ret = float(valid.loc[mask, col].mean()) if mask.any() else 0.0
             rows.append({"periodo": periodo, "regime": regime, "fwd_mean": mean_ret})
     regime_fwd = pd.DataFrame(rows)
 
@@ -313,7 +326,7 @@ def build_features(
     scatter_corr: dict[str, tuple[float, float]] = {}
     for periodo in FORWARD_PERIODS:
         col = f"fwd_{periodo}"
-        valid = feat[["shannon_ret", col]].dropna()
+        valid = feat_fwd[["shannon_ret", col]].dropna()
         if len(valid) > 10:
             r, p = pearsonr(valid["shannon_ret"], valid[col])
             scatter_corr[periodo] = (round(float(r), 4), round(float(p), 4))
@@ -323,7 +336,6 @@ def build_features(
     log_lines.append("Studio 4 (Scatter Entropia × Returns) ✓")
 
     # ── 11. Percentile storico (Studio 5) ───────────────────────
-    # Già disponibile dalla serie shannon_ret → calcolato in app.py con rank()
     log_lines.append("Studio 5 (Percentile Entropia) ✓")
 
     # ── 12. Heatmap mensile (Studio 6) ──────────────────────────
@@ -334,7 +346,6 @@ def build_features(
         .mean()
         .unstack(level="mese")
     )
-    # Rinomina colonne con abbreviazioni mesi italiane
     mesi_ita = {1:"Gen", 2:"Feb", 3:"Mar", 4:"Apr", 5:"Mag", 6:"Giu",
                 7:"Lug", 8:"Ago", 9:"Set", 10:"Ott", 11:"Nov", 12:"Dic"}
     heatmap_data.columns = [mesi_ita[m] for m in heatmap_data.columns]
@@ -347,6 +358,11 @@ def build_features(
         .rolling(REGIME_CORR_WINDOW)
         .corr(feat["shannon_ret"])
     )
+
+    # ── 14. Aggiungi forward return a feat per scatter (Studio 4) ─
+    # Solo le colonne fwd vanno aggiunte a feat per uso in charts.py
+    for col, series in fwd_series.items():
+        feat[col] = series
 
     log_lines.append("✅ Completato")
 
