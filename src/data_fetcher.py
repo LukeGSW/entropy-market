@@ -67,34 +67,36 @@ def get_label(eodhd_ticker: str) -> str:
 @st.cache_data(ttl=3600)
 def fetch_ohlcv(
     ticker: str,
-    from_date: str = "1950-01-01",
-    to_date: str | None = None,
+    to_date: str,
     api_key: str | None = None,
 ) -> pd.DataFrame:
     """
-    Scarica i prezzi storici giornalieri da EODHD Historical Data API.
+    Scarica l'intera storia disponibile da EODHD per il ticker richiesto.
+
+    Il parametro `from_date` non viene passato all'API per evitare il troncamento:
+    EODHD restituisce al massimo ~19.000 record per chiamata. Se si parte dal 1950
+    con un asset longevo come SPX, il limite viene raggiunto e i dati più recenti
+    vengono tagliati. Scaricando dall'origine e filtrando lato Python si ottiene
+    sempre l'ultima candela disponibile.
 
     Parameters
     ----------
-    ticker    : Ticker in formato EODHD (es. 'GSPC.INDX', 'BTC-USD.CC')
-    from_date : Data di inizio nel formato 'YYYY-MM-DD'
-    to_date   : Data di fine ('YYYY-MM-DD'). Se None usa la data di oggi.
-    api_key   : Chiave API EODHD. Se None viene letta da st.secrets.
+    ticker   : Ticker EODHD (es. 'GSPC.INDX', 'BTC-USD.CC')
+    to_date  : Data di fine 'YYYY-MM-DD' — deve essere esplicita nella firma
+               perché entra nella chiave della cache e la invalida ogni giorno.
+    api_key  : Chiave API EODHD. Se None viene letta da st.secrets.
 
     Returns
     -------
     pd.DataFrame con colonne: open, high, low, close, adjusted_close, volume
-    Index: DatetimeIndex
+    Index: DatetimeIndex, ordinato dal più vecchio al più recente.
     """
     if api_key is None:
         api_key = st.secrets["EODHD_API_KEY"]
 
-    if to_date is None:
-        to_date = pd.Timestamp.today().strftime("%Y-%m-%d")
-
     url = (
         f"https://eodhd.com/api/eod/{ticker}"
-        f"?from={from_date}&to={to_date}"
+        f"?to={to_date}"
         f"&period=d&api_token={api_key}&fmt=json"
     )
 
