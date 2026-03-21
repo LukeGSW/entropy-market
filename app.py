@@ -155,11 +155,16 @@ if not run_analysis:
 ticker_label = get_label(eodhd_ticker)
 
 # ── Fetch dati ───────────────────────────────────────────────
+# to_date calcolato FUORI dalla funzione cachata: entra nella chiave della cache
+# e forza un fetch fresco ogni volta che la data corrente cambia.
+today_str = pd.Timestamp.today().strftime("%Y-%m-%d")
+
 with st.spinner(f"Scaricamento dati per **{eodhd_ticker}** da EODHD..."):
     try:
         df_raw = fetch_ohlcv(
             ticker=eodhd_ticker,
             from_date=str(start_date),
+            to_date=today_str,
         )
     except Exception as e:
         st.error(f"❌ Errore nel download dei dati: {e}")
