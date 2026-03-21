@@ -14,6 +14,9 @@ Deployment:
 
 from __future__ import annotations
 
+import json
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 
@@ -40,6 +43,7 @@ from src.charts import (
     build_percentile_chart,
     build_cross_entropy_heatmap,
 )
+from src.export import build_entropy_export
 
 # ============================================================
 # CONFIGURAZIONE PAGINA
@@ -559,6 +563,26 @@ with st.expander("🔬 Metodologia, Fondamenti Teorici e Riferimenti"):
     - Nessuna delle misure presentate costituisce un segnale operativo autonomo.
       Vanno sempre integrate in un framework di risk management completo.
     """)
+
+# ============================================================
+# EXPORT JSON
+# ============================================================
+st.markdown("---")
+st.subheader("⬇ Esporta dati per ricerca alpha")
+st.markdown(
+    "Scarica il JSON completo con time series, regime alpha, correlazioni, alpha signals e "
+    "statistiche stagionali — strutturato per analisi esterne di insight e alpha."
+)
+_export_payload = build_entropy_export(result)
+_json_bytes = json.dumps(_export_payload, ensure_ascii=False, indent=2).encode("utf-8")
+st.download_button(
+    label="⬇ Scarica JSON Backtest",
+    data=_json_bytes,
+    file_name=f"entropy_{eodhd_ticker.replace('.', '_')}_{date.today()}.json",
+    mime="application/json",
+    help="JSON strutturato per ricerca di insight e alpha: time series, regime alpha, segnali, heatmap, statistiche.",
+)
+
 
 # ============================================================
 # FOOTER
