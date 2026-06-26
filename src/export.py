@@ -309,6 +309,50 @@ def _build_statistical_summary(feat: pd.DataFrame) -> dict:
 
 
 # ================================================================
+# SEZIONE 6 — PREDITTIVITÀ (Studi 3-4, statistiche HAC, Shannon + PE)
+# ================================================================
+
+def _build_predictivity(result: EntropyResult) -> dict:
+    """
+    Serializza la predittività point-in-time + HAC per ogni misura di entropia:
+      regime_forward : media/hit-rate/p_HAC per regime e orizzonte
+      scatter_slope  : pendenza/correlazione, p_HAC e N efficace per orizzonte
+    """
+    out: dict[str, dict] = {}
+    for key, pred in result.predictivity.items():
+        reg = pred.get("regime_stats", pd.DataFrame())
+        slope = pred.get("slope_stats", pd.DataFrame())
+
+        regime_list = [] if reg.empty else [
+            {
+                "periodo":          str(r["periodo"]),
+                "regime":           str(r["regime"]),
+                "n":                int(r["n"]),
+                "mean_pct":         _safe_float(r["mean_pct"]),
+                "hit_rate":         _safe_float(r["hit_rate"]),
+                "t_hac":            _safe_float(r["t_hac"]),
+                "p_hac":            _safe_float(r["p_hac"]),
+                "significant_5pct": bool(r["sig"]),
+            }
+            for _, r in reg.iterrows()
+        ]
+        slope_list = [] if slope.empty else [
+            {
+                "periodo":      str(r["periodo"]),
+                "pearson_r":    _safe_float(r["pearson_r"]),
+                "spearman_rho": _safe_float(r["spearman_rho"]),
+                "slope":        _safe_float(r["slope"]),
+                "p_hac":        _safe_float(r["p_hac"]),
+                "n_eff":        _safe_float(r["n_eff"]),
+                "n":            int(r["n"]),
+            }
+            for _, r in slope.iterrows()
+        ]
+        out[key] = {"regime_forward": regime_list, "scatter_slope": slope_list}
+    return out
+
+
+# ================================================================
 # ENTRY POINT
 # ================================================================
 
@@ -342,6 +386,9 @@ def build_entropy_export(result: EntropyResult) -> dict:
                 "pe_order":        result.pe_order,
                 "pe_window":       result.shannon_window,
                 "forward_periods": list(FORWARD_PERIODS.keys()),
+                "regime_method":   "expanding_tertiles_point_in_time",
+                "regime_min_periods": result.regime_min_periods,
+                "significance":    "HAC_Newey_West_lag_eq_horizon",
                 "regime_p33":      _safe_float(result.regime_p33),
                 "regime_p67":      _safe_float(result.regime_p67),
                 "pe_p33":          _safe_float(result.pe_p33),
@@ -358,12 +405,13 @@ def build_entropy_export(result: EntropyResult) -> dict:
         "regime_alpha":      _build_regime_alpha(feat),
         "correlations":      {
             periodo: {
-                "r":       _safe_float(r),
-                "p_value": _safe_float(p),
+                "r":            _safe_float(r),
+                "p_value_hac":  _safe_float(p),
                 "significant_5pct": (p is not None and p < 0.05),
             }
             for periodo, (r, p) in result.scatter_corr.items()
         },
+        "predictivity":      _build_predictivity(result),
         "alpha_signals":     _build_alpha_signals(
             feat, pct_series,
             result.regime_p33, result.regime_p67,
