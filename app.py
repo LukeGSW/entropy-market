@@ -253,7 +253,7 @@ r4.metric(
 r5.metric(
     "Regime attuale",
     f"{regime_icon} {current_regime}",
-    help="Regime determinato dai tertili (P33/P67) della Shannon Entropy storica",
+    help="Regime point-in-time: tertili P33/P67 expanding (solo storia fino a oggi, niente look-ahead)",
 )
 r6.metric(
     "Periodo analizzato",
@@ -330,50 +330,49 @@ st.divider()
 st.subheader("📊 Studio 3 — Regime Entropia → Forward Returns medi")
 
 st.markdown(f"""
-Questo studio verifica se esiste una **relazione sistematica** tra il regime di entropia
-corrente e i rendimenti futuri del mercato.
+Questo studio risponde alla domanda chiave: **il regime di entropia al tempo t determina,
+con valore statistico, un rendimento positivo a distanza x?**
 
-**Metodologia:**
-> Si suddivide la storia in 3 regime usando i **tertili** (P33/P67) della Shannon Entropy:
-> - 🟢 **Bassa entropia** (H ≤ {result.regime_p33:.3f}): mercato con struttura, rendimenti concentrati
-> - 🟡 **Media entropia** ({result.regime_p33:.3f} < H ≤ {result.regime_p67:.3f}): stato neutro
-> - 🔴 **Alta entropia** (H > {result.regime_p67:.3f}): mercato caotico/incerto
->
-> Per ciascun regime si calcola il forward return medio a 1M / 3M / 6M / 12M.
+**Metodologia (onesta e replicabile):**
+> - Regime con **tertili point-in-time** (expanding): la soglia al tempo t usa solo la
+>   storia fino a t → niente look-ahead, è il regime conoscibile in tempo reale.
+>   Soglie correnti: 🟢 Bassa (H ≤ {result.regime_p33:.3f}) · 🟡 Media · 🔴 Alta (H > {result.regime_p67:.3f}).
+> - Per ogni regime e orizzonte: forward return **medio**, **hit-rate** (% positivo) e
+>   **test di significatività HAC / Newey-West** (lag = orizzonte) che corregge la
+>   sovrapposizione dei forward returns.
 
-**Interpretazione operativa:**
-- Se la barra verde (bassa entropia) è sistematicamente più alta delle altre,
-  la bassa entropia è un segnale **rialzista** prospettico.
-- Questo può essere usato come **filtro di regime** in strategie sistematiche.
+**Le barre con `★` hanno media statisticamente ≠ 0 al 5%.** Se l'unica significativa è
+la verde (bassa entropia) con media positiva, hai un vero segnale di filtro di regime.
 
-> ⚠️ I risultati sono descrittivi e basati sulla storia: le performance passate
-> non garantiscono risultati futuri. Sempre verificare la robustezza statistica
-> e le condizioni di mercato attuali.
+> ⚠️ Senza la correzione HAC i p-value sarebbero enormemente sovrastimati (la N efficace
+> non è il numero di giorni ma ~ giorni/orizzonte).
 """)
 
-fig3 = build_regime_bar_chart(result)
+fig3 = build_regime_bar_chart(result, entropy_key="shannon_ret")
 st.plotly_chart(fig3, width="stretch")
 
-# Tabella riepilogativa
-with st.expander("📋 Tabella completa Forward Returns per Regime"):
-    pivot = result.regime_fwd.pivot(index="regime", columns="periodo", values="fwd_mean")
-    pivot = pivot.reindex(["Bassa", "Media", "Alta"])[["1M", "3M", "6M", "12M"]]
+# Verdetto sintetico Shannon (media + significatività)
+with st.expander("📋 Verdetto statistico — Forward Returns per Regime (Shannon)"):
+    sh_reg = result.predictivity["shannon_ret"]["regime_stats"]
+    if not sh_reg.empty:
+        sh_reg = sh_reg.copy()
+        sh_reg["valore"] = sh_reg.apply(
+            lambda r: f"{r['mean_pct']:.2f}%{' ★' if r['sig'] else ''} (hit {r['hit_rate']:.0f}%, p={r['p_hac']:.3f})",
+            axis=1,
+        )
+        pivot = sh_reg.pivot(index="regime", columns="periodo", values="valore")
+        pivot = pivot.reindex([r for r in ["Bassa", "Media", "Alta"] if r in pivot.index])
+        pivot = pivot[[c for c in ["1M", "3M", "6M", "12M"] if c in pivot.columns]]
+        st.dataframe(pivot, use_container_width=True)
+        st.caption("★ = media significativamente ≠ 0 al 5% (Newey-West, lag = orizzonte).")
+    else:
+        st.info("Dati insufficienti per il verdetto.")
 
-    def _color_val(val):
-        if val > 0.5:
-            return "background-color: #1A5C1A; color: #C0F0C0"
-        elif val > 0:
-            return "background-color: #5D7A1A; color: #E0F0B0"
-        elif val > -0.5:
-            return "background-color: #B35C00; color: #FFE0B0"
-        return "background-color: #8B1A1A; color: #FFD0D0"
-
-    st.dataframe(
-        pivot.style
-        .format("{:.2f}%")
-        .map(_color_val),
-        use_container_width=False,
-    )
+# ── Stessa analisi sulla Permutation Entropy ────────────────────
+st.markdown("**Stessa analisi sulla Permutation Entropy** (segnale di prevedibilità "
+            "potenzialmente più nitido; regime PE point-in-time):")
+fig3pe = build_regime_bar_chart(result, entropy_key="perm_entropy")
+st.plotly_chart(fig3pe, width="stretch")
 
 st.divider()
 
@@ -383,42 +382,41 @@ st.divider()
 st.subheader("🔍 Studio 4 — Scatter Entropia vs Forward Returns")
 
 st.markdown("""
-Lo scatter plot mostra la **relazione lineare** tra il livello di entropia corrente
-e il forward return realizzato. Ogni punto rappresenta un giorno di trading,
-colorato in base al **decennio** di appartenenza.
+Lo scatter mostra il livello di entropia corrente vs il forward return realizzato (un
+punto per giorno, colorato per **decennio**). Oltre ai punti grezzi:
+- la **curva bianca** è la media condizionata per **decile di entropia** (± errore std) —
+  è *la* curva di predittività: ti dice il rendimento medio atteso a ogni livello di entropia;
+- la **linea ciano** è uno **smoother** che rivela relazioni non-lineari;
+- in ogni pannello l'annotazione riporta **Pearson r**, **Spearman ρ**, **p-value HAC** e **N efficace**.
 
-**Correlazioni di Pearson (r) e p-value:**
-- **r negativo** → alta entropia associata a minori rendimenti futuri (relazione inversa)
-- **p < 0.05** → correlazione statisticamente significativa al 95%
-
+**Il p-value è quello HAC** (corretto per la sovrapposizione dei forward): è l'unico
+credibile. Il valore di Pearson grezzo avrebbe un p ottimisticamente piccolo.
 """)
 
 corr_cols = st.columns(4)
 for i, (periodo, (r, p)) in enumerate(result.scatter_corr.items()):
     p_str = f"{p:.3f}" if p >= 0.001 else "< 0.001"
-    delta_color = "inverse" if r < 0 else "normal"
     corr_cols[i].metric(
         label=f"r ({periodo})",
         value=f"{r:.3f}",
-        delta=f"p = {p_str}",
+        delta=f"p_HAC = {p_str}",
         delta_color="off",
-        help=f"Correlazione di Pearson tra Shannon Entropy e Forward Return {periodo}",
+        help=f"Pearson r tra Shannon Entropy e Forward Return {periodo}; p-value HAC (Newey-West)",
     )
 
 st.markdown("""
-> 📌 Una correlazione negativa sistematica tra entropia e rendimenti futuri
-> è coerente con la teoria dell'**efficienza informazionale adattiva** (AMH, Lo 2004):
-> nei periodi di alta incertezza (alta entropia), il mercato tende ad avere
-> rendimenti attesi inferiori perché il rischio è più difficile da prezzare.
-
-Le **linee di regressione** mostrano il trend lineare per ciascun orizzonte.
-I **punti di quadrante** (mediana × mediana) suddividono il piano in 4 zone operative:
-- 🟢 Bassa ent / Alto ret — zona favorevole
-- 🔴 Alta ent / Basso ret — zona sfavorevole
+> 📌 Una relazione negativa sistematica entropia→rendimenti è coerente con
+> l'**efficienza adattiva** (AMH, Lo 2004): in alta incertezza il rischio è più difficile
+> da prezzare. Guarda soprattutto la **curva bianca**: se è monotòna decrescente e le barre
+> d'errore non attraversano lo zero nei decili estremi, la predittività è reale.
 """)
 
-fig4 = build_scatter_grid(result)
+fig4 = build_scatter_grid(result, entropy_key="shannon_ret")
 st.plotly_chart(fig4, width="stretch")
+
+st.markdown("**Stessi scatter sulla Permutation Entropy:**")
+fig4pe = build_scatter_grid(result, entropy_key="perm_entropy")
+st.plotly_chart(fig4pe, width="stretch")
 st.divider()
 
 # ============================================================
@@ -506,7 +504,8 @@ with st.expander("🔬 Metodologia, Fondamenti Teorici e Riferimenti"):
     | Permutation Entropy | `PE(t) = H_perm / log₂(m!)` | m={pe_order}, finestra {shannon_window}g, normalizzata [0,1] |
     | Forward return | `fwd_N(t) = Σ r_{{t+1..t+N}}` | N ∈ {{21, 63, 126, 252}} |
     | Percentile | `pct(t) = rank(H_t) / rank_max` | Expanding (solo storia passata) |
-    | Regime | Tertili P33={result.regime_p33:.4f}, P67={result.regime_p67:.4f} | Bassa/Media/Alta |
+    | Regime | Tertili P33/P67 **expanding** (point-in-time) | Soglie correnti: {result.regime_p33:.4f} / {result.regime_p67:.4f} — niente look-ahead |
+    | Significatività | t = β / se_HAC, lag = orizzonte | Newey-West (1987): corregge sovrapposizione forward |
 
     ### Shannon Entropy
 
@@ -531,14 +530,17 @@ with st.expander("🔬 Metodologia, Fondamenti Teorici e Riferimenti"):
     - **1.0** → tutti i pattern sono equiprobabili → massima complessità
     - **0.0** → un solo pattern domina → serie monotona
 
-    ### Correlazione Scatter (Studio 4)
+    ### Correlazione Scatter (Studio 4) — p-value HAC
 
-    | Orizzonte | r di Pearson | p-value | Interpretazione |
+    | Orizzonte | r di Pearson | p-value HAC | Interpretazione |
     |-----------|-------------|---------|-----------------|
     | 1M  | {result.scatter_corr.get("1M",  (0,0))[0]:.4f} | {result.scatter_corr.get("1M",  (0,1))[1]:.4f} | {'Significativo' if result.scatter_corr.get('1M',(0,1))[1] < 0.05 else 'Non significativo'} al 5% |
     | 3M  | {result.scatter_corr.get("3M",  (0,0))[0]:.4f} | {result.scatter_corr.get("3M",  (0,1))[1]:.4f} | {'Significativo' if result.scatter_corr.get('3M',(0,1))[1] < 0.05 else 'Non significativo'} al 5% |
     | 6M  | {result.scatter_corr.get("6M",  (0,0))[0]:.4f} | {result.scatter_corr.get("6M",  (0,1))[1]:.4f} | {'Significativo' if result.scatter_corr.get('6M',(0,1))[1] < 0.05 else 'Non significativo'} al 5% |
     | 12M | {result.scatter_corr.get("12M", (0,0))[0]:.4f} | {result.scatter_corr.get("12M", (0,1))[1]:.4f} | {'Significativo' if result.scatter_corr.get('12M',(0,1))[1] < 0.05 else 'Non significativo'} al 5% |
+
+    > I p-value sono **HAC / Newey-West** (lag = orizzonte): correggono la sovrapposizione
+    > dei forward returns. La N efficace reale è ~ N_giorni / orizzonte, non N_giorni.
 
     ### Riferimenti Bibliografici
 
