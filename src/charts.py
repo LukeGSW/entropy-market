@@ -28,8 +28,16 @@ from src.calculations import (
     ALERT_HIGH,
     ALERT_LOW,
     REGIME_CORR_WINDOW,
+    FORWARD_PERIODS,
+    ENTROPY_MEASURES,
     compute_percentile_series,
 )
+
+# Mappa misura → (colonna entropia, colonna regime)
+_MEASURE_COLS = {
+    "shannon_ret":  ("shannon_ret", "regime"),
+    "perm_entropy": ("perm_entropy", "regime_pe"),
+}
 
 # ================================================================
 # PALETTE COLORI E LAYOUT BASE
@@ -252,37 +260,59 @@ def build_perm_entropy_chart(result: EntropyResult) -> go.Figure:
 # STUDIO 3 — Regime → Forward Returns
 # ================================================================
 
-def build_regime_bar_chart(result: EntropyResult) -> go.Figure:
+def build_regime_bar_chart(result: EntropyResult, entropy_key: str = "shannon_ret") -> go.Figure:
     """
-    Studio 3 — Bar chart raggruppato:
-      Asse X: orizzonti 1M / 3M / 6M / 12M
-      Asse Y: Forward Return medio (%)
-      3 serie: Bassa / Media / Alta entropia
+    Studio 3 — Bar chart raggruppato: forward return medio per regime e orizzonte,
+    con test di significatività HAC (media ≠ 0) e hit-rate.
+
+    Le barre con `★` hanno media statisticamente ≠ 0 al 5% (p-value Newey-West,
+    lag = orizzonte, che corregge la sovrapposizione dei forward returns).
+    Il testo sopra ogni barra mostra il return medio; l'hover aggiunge hit-rate,
+    N e p_HAC.
     """
-    regime_fwd = result.regime_fwd
+    reg = result.predictivity.get(entropy_key, {}).get("regime_stats", pd.DataFrame())
+    label = ENTROPY_MEASURES.get(entropy_key, entropy_key)
     colori = {"Bassa": C["green"], "Media": C["yellow"], "Alta": C["red"]}
-    periodi = ["1M", "3M", "6M", "12M"]
+    periodi = list(FORWARD_PERIODS.keys())
 
     fig = go.Figure()
 
     for regime in ["Bassa", "Media", "Alta"]:
-        sub = regime_fwd[regime_fwd["regime"] == regime].set_index("periodo")
-        y_vals = [sub.loc[p, "fwd_mean"] if p in sub.index else 0.0 for p in periodi]
+        means, texts, hits, ps, ns = [], [], [], [], []
+        for p in periodi:
+            row = reg[(reg["regime"] == regime) & (reg["periodo"] == p)] if not reg.empty else reg
+            if not reg.empty and len(row):
+                m = float(row["mean_pct"].iloc[0])
+                sig = bool(row["sig"].iloc[0])
+                means.append(m)
+                texts.append(f"{m:.2f}%{' ★' if sig else ''}")
+                hits.append(float(row["hit_rate"].iloc[0]))
+                ps.append(float(row["p_hac"].iloc[0]))
+                ns.append(int(row["n"].iloc[0]))
+            else:
+                means.append(0.0); texts.append(""); hits.append(np.nan); ps.append(np.nan); ns.append(0)
 
+        customdata = np.column_stack([hits, ps, ns])
         fig.add_trace(go.Bar(
             name=f"Entropia {regime}",
             x=periodi,
-            y=y_vals,
+            y=means,
             marker_color=colori[regime],
-            text=[f"{v:.2f}%" for v in y_vals],
+            text=texts,
             textposition="outside",
-            hovertemplate="Regime: " + regime + "<br>Orizzonte: %{x}<br>Return medio: %{y:.2f}%<extra></extra>",
+            customdata=customdata,
+            hovertemplate=(
+                f"Regime: {regime}<br>Orizzonte: %{{x}}<br>"
+                "Return medio: %{y:.2f}%<br>"
+                "Hit-rate: %{customdata[0]:.1f}%<br>"
+                "p_HAC: %{customdata[1]:.3f}  ·  N: %{customdata[2]:,}<extra></extra>"
+            ),
         ))
 
     fig.update_layout(
         **_base_layout(
             title=dict(
-                text="Studio 3 — Regime Entropia → Forward Returns medi",
+                text=f"Studio 3 — {label}: Regime → Forward Returns (★ = significativo 5% HAC)",
                 font=dict(size=15, color=C["text"]),
             ),
             barmode="group",
@@ -291,10 +321,7 @@ def build_regime_bar_chart(result: EntropyResult) -> go.Figure:
             yaxis=_axis("Forward Return medio (%)"),
         )
     )
-
-    # Linea dello zero
     fig.add_hline(y=0, line_color=C["grey"], line_width=0.8)
-
     return fig
 
 
@@ -302,100 +329,138 @@ def build_regime_bar_chart(result: EntropyResult) -> go.Figure:
 # STUDIO 4 — Scatter Entropia × Forward Returns
 # ================================================================
 
-def build_scatter_grid(result: EntropyResult) -> go.Figure:
+def build_scatter_grid(result: EntropyResult, entropy_key: str = "shannon_ret") -> go.Figure:
     """
-    Studio 4 — 2×2 scatter plot (1M / 3M / 6M / 12M).
-      Asse X: Shannon Entropy (returns)
-      Asse Y: Forward Return cumulativo (%)
-      Colore punti: decennio di appartenenza
-      Regression line per ogni pannello con r e p-value
+    Studio 4 — 2×2 scatter (1M/3M/6M/12M): entropia corrente vs forward return.
+
+    Su ogni pannello:
+      • punti grezzi colorati per decennio (bassa opacità),
+      • curva di predittività binnata (media per decile ± SE), in bianco,
+      • smoother kernel (ciano) per la forma non-lineare,
+      • annotazione con Pearson r, Spearman ρ, p-value HAC e N efficace.
     """
+    entropy_col, _ = _MEASURE_COLS[entropy_key]
+    label = ENTROPY_MEASURES.get(entropy_key, entropy_key)
+    pred = result.predictivity.get(entropy_key, {})
+    slope_stats = pred.get("slope_stats", pd.DataFrame())
+    binned = pred.get("binned", {})
+    smoother = pred.get("smoother", {})
     feat = result.feat
-    periodi = list(result.scatter_corr.keys())
+    periodi = list(FORWARD_PERIODS.keys())
 
     fig = make_subplots(
         rows=2, cols=2,
         subplot_titles=[f"Entropia → Forward Return {p}" for p in periodi],
-        vertical_spacing=0.12,
+        vertical_spacing=0.13,
         horizontal_spacing=0.08,
     )
 
-    # Colori per decennio
     decade_colors = {
         1950: "#4FC3F7", 1960: "#4DB6AC", 1970: "#81C784",
         1980: "#FFD54F", 1990: "#FF8A65", 2000: "#F06292",
         2010: "#BA68C8", 2020: "#E0E0E0",
     }
-
     positions = [(1, 1), (1, 2), (2, 1), (2, 2)]
 
     for idx, (periodo, (row, col)) in enumerate(zip(periodi, positions)):
         col_fwd = f"fwd_{periodo}"
-        sub = feat[["shannon_ret", col_fwd, "anno"]].dropna()
+        sub = feat[[entropy_col, col_fwd, "anno"]].dropna()
         sub["decade"] = (sub["anno"] // 10 * 10).astype(int)
 
-        # Scatter punti per decennio
+        # Punti grezzi per decennio (bassa opacità → leggibilità)
         for decade, grp in sub.groupby("decade"):
             color = decade_colors.get(decade, C["grey"])
             fig.add_trace(go.Scatter(
-                x=grp["shannon_ret"],
-                y=grp[col_fwd],
+                x=grp[entropy_col], y=grp[col_fwd],
                 mode="markers",
                 name=str(decade),
-                marker=dict(color=color, size=3, opacity=0.5),
-                showlegend=(idx == 0),  # legenda solo nel primo pannello
+                marker=dict(color=color, size=3, opacity=0.28),
+                showlegend=(idx == 0),
                 legendgroup=str(decade),
                 hovertemplate=(
-                    f"Anno: %{{customdata}}<br>"
-                    f"Entropia: %{{x:.3f}}<br>"
+                    "Anno: %{customdata}<br>"
+                    "Entropia: %{x:.3f}<br>"
                     f"Fwd {periodo}: %{{y:.2f}}%<extra></extra>"
                 ),
                 customdata=sub.loc[grp.index, "anno"],
             ), row=row, col=col)
 
-        # Regression line
-        if len(sub) > 10:
-            slope, intercept, r, p, _ = linregress(sub["shannon_ret"], sub[col_fwd])
-            x_range = np.linspace(sub["shannon_ret"].min(), sub["shannon_ret"].max(), 100)
-            y_fit = slope * x_range + intercept
-            r_val, p_val = result.scatter_corr.get(periodo, (np.nan, np.nan))
-            p_str = f"{p_val:.3f}" if p_val >= 0.001 else "< 0.001"
-
+        # Smoother kernel
+        if periodo in smoother:
+            xs, ys = smoother[periodo]
             fig.add_trace(go.Scatter(
-                x=x_range, y=y_fit,
-                mode="lines",
-                name=f"{periodo}: r={r_val:.2f}, p={p_str}",
-                line=dict(color=C["white"], width=1.8, dash="solid"),
-                showlegend=True,
-                legendgroup=f"reg_{periodo}",
+                x=xs, y=ys, mode="lines",
+                name="Smoother",
+                line=dict(color=C["cyan"], width=2.2),
+                showlegend=(idx == 0), legendgroup="smoother",
+                hovertemplate="Entropia: %{x:.3f}<br>Fwd medio: %{y:.2f}%<extra></extra>",
             ), row=row, col=col)
 
-        # Linee di quadrante
-        x_med = float(sub["shannon_ret"].median())
-        y_med = float(sub[col_fwd].median())
-        fig.add_vline(x=x_med, line_color=C["grey"], line_width=0.6,
-                      line_dash="dot", row=row, col=col)
-        fig.add_hline(y=y_med, line_color=C["grey"], line_width=0.6,
-                      line_dash="dot", row=row, col=col)
+        # Curva binnata (media per decile ± SE)
+        bdf = binned.get(periodo, pd.DataFrame())
+        if not bdf.empty:
+            fig.add_trace(go.Scatter(
+                x=bdf["bin_center"], y=bdf["mean"],
+                mode="markers+lines",
+                name="Media per decile ± SE",
+                line=dict(color=C["white"], width=1.4),
+                marker=dict(color=C["white"], size=6, symbol="diamond"),
+                error_y=dict(type="data", array=bdf["se"], color=C["white"],
+                             thickness=1.0, width=2),
+                showlegend=(idx == 0), legendgroup="binned",
+                customdata=np.column_stack([bdf["hit_rate"], bdf["n"]]),
+                hovertemplate=(
+                    "Entropia≈%{x:.3f}<br>Fwd medio: %{y:.2f}%<br>"
+                    "Hit-rate: %{customdata[0]:.1f}%  ·  N: %{customdata[1]:,}<extra></extra>"
+                ),
+            ), row=row, col=col)
+
+        # Linea dello zero (rendimento nullo)
+        fig.add_hline(y=0, line_color=C["grey"], line_width=0.6, line_dash="dot",
+                      row=row, col=col)
+
+        # Annotazione statistica (HAC)
+        srow = slope_stats[slope_stats["periodo"] == periodo] if not slope_stats.empty else slope_stats
+        if not slope_stats.empty and len(srow):
+            r_val = float(srow["pearson_r"].iloc[0])
+            rho   = float(srow["spearman_rho"].iloc[0])
+            p_hac = float(srow["p_hac"].iloc[0])
+            n_eff = float(srow["n_eff"].iloc[0])
+            p_str = f"{p_hac:.3f}" if p_hac >= 0.001 else "&lt;0.001"
+            axn = idx + 1
+            xref = "x domain" if axn == 1 else f"x{axn} domain"
+            yref = "y domain" if axn == 1 else f"y{axn} domain"
+            fig.add_annotation(
+                xref=xref, yref=yref,
+                x=0.03, y=0.97, xanchor="left", yanchor="top",
+                text=(f"r={r_val:.2f}  ρ={rho:.2f}<br>"
+                      f"p_HAC={p_str}  N_eff={n_eff:.0f}"),
+                showarrow=False, align="left",
+                font=dict(size=10, color=C["white"]),
+                bgcolor="rgba(0,0,0,0.45)", bordercolor="rgba(255,255,255,0.2)",
+                borderwidth=1, borderpad=3,
+            )
 
     fig.update_layout(
         **_base_layout(
             title=dict(
-                text="Studio 4 — Entropia Returns vs Forward Returns (1M/3M/6M/12M)",
+                text=f"Studio 4 — {label} vs Forward Returns (curva binnata + smoother, p HAC)",
                 font=dict(size=15, color=C["text"]),
             ),
-            height=720,
+            height=760,
         )
     )
 
     for r in [1, 2]:
         for c in [1, 2]:
-            fig.update_xaxes(_axis("Entropia Shannon"), row=r, col=c)
+            fig.update_xaxes(_axis("Entropia"), row=r, col=c)
             fig.update_yaxes(_axis("Forward Return (%)"), row=r, col=c)
 
     for ann in fig.layout.annotations:
-        ann.font.color = C["grey"]
-        ann.font.size = 11
+        # solo i titoli dei subplot (gli altri hanno già font impostato)
+        if ann.text.startswith("Entropia →"):
+            ann.font.color = C["grey"]
+            ann.font.size = 11
 
     return fig
 
