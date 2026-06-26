@@ -56,7 +56,7 @@ from scipy.stats import entropy as scipy_entropy, pearsonr, spearmanr, norm
 SHANNON_WINDOW: int = 63    # finestra rolling Shannon ≈ 1 trimestre (63 trading days)
 SHANNON_BINS: int = 10      # bin per discretizzazione serie temporale
 PE_ORDER: int = 3           # embedding dimension Permutation Entropy
-PE_WINDOW: int = 63         # finestra rolling PE (stessa di Shannon per coerenza)
+PE_WINDOW: int = 63         # default fallback PE; in build_features la finestra PE = finestra Shannon
 REGIME_CORR_WINDOW: int = 126  # finestra correlazione rolling cross-entropy (≈6M)
 
 # Storia minima prima di assegnare un regime point-in-time (expanding)
@@ -102,6 +102,7 @@ class EntropyResult:
     shannon_window: int
     pe_order: int
     regime_min_periods: int
+    shannon_bins: int
 
     # Soglie regime CORRENTI (ultimo valore expanding) — solo per display
     regime_p33: float
@@ -131,31 +132,50 @@ class EntropyResult:
 # CORE — MISURE DI ENTROPIA
 # ================================================================
 
+def bins_for_window(window: int) -> int:
+    """
+    Numero di bin per la Shannon Entropy in funzione della finestra (regola √N,
+    con floor 5 e cap 20). Evita ~2 osservazioni/bin sulle finestre corte
+    (entropia fortemente distorta) e troppi bin vuoti su quelle lunghe.
+    Per la finestra di default (63g) → 8 bin.
+    """
+    return int(np.clip(round(np.sqrt(window)), 5, 20))
+
+
 def _shannon_entropy_window(arr: np.ndarray, bins: int = SHANNON_BINS) -> float:
     """
-    Calcola la Shannon Entropy di un array tramite discretizzazione in `bins` bin.
+    Shannon Entropy (in bit) di un array discretizzato in `bins` bin, con
+    correzione di bias di Miller-Madow per il sotto-campionamento:
 
-    H = -Σ p_i · log2(p_i)
+        H_MM = H_plugin + (m̂ − 1) / (2N)      [in nat]
 
-    dove p_i è la frequenza relativa dell'i-esimo bin.
-    Ritorna 0.0 se tutti i valori cadono in un solo bin.
+    dove m̂ = numero di bin non vuoti, N = osservazioni nella finestra. La
+    correzione riduce la sistematica sottostima dell'entropia quando le
+    osservazioni per bin sono poche (finestre corte). Ritorna NaN se vuoto.
     """
     counts, _ = np.histogram(arr, bins=bins)
     total = counts.sum()
     if total == 0:
         return np.nan
-    probs = counts[counts > 0] / total
-    return float(scipy_entropy(probs, base=2))
+    nz = counts[counts > 0]
+    probs = nz / total
+    h_plugin = float(-np.sum(probs * np.log2(probs)))       # bit
+    mm = (nz.size - 1) / (2.0 * total) / np.log(2.0)         # correzione (nat → bit)
+    return h_plugin + mm
 
 
 def shannon_entropy_series(
     series: pd.Series,
     window: int = SHANNON_WINDOW,
-    bins: int = SHANNON_BINS,
+    bins: int | None = None,
 ) -> pd.Series:
     """
-    Applica Shannon Entropy su una finestra rolling di `window` osservazioni.
+    Applica Shannon Entropy (con correzione Miller-Madow) su una finestra rolling.
+    Se `bins` è None, il numero di bin è scelto in funzione della finestra
+    (bins_for_window) per mantenere coerente il rapporto osservazioni/bin.
     """
+    if bins is None:
+        bins = bins_for_window(window)
     return series.rolling(window).apply(
         lambda x: _shannon_entropy_window(x, bins=bins),
         raw=True,
@@ -450,12 +470,16 @@ def build_features(
     log_lines.append("Returns / Volatilità / Skewness calcolati")
 
     # ── 3. Shannon Entropy rolling ───────────────────────────────
-    sh_ret  = shannon_entropy_series(log_ret, window=shannon_window)
-    sh_vol  = shannon_entropy_series(vol,     window=shannon_window)
-    sh_skew = shannon_entropy_series(skew,    window=shannon_window)
+    # Bin adattivi alla finestra (√N) + correzione Miller-Madow.
+    n_bins = bins_for_window(shannon_window)
+    sh_ret  = shannon_entropy_series(log_ret, window=shannon_window, bins=n_bins)
+    sh_vol  = shannon_entropy_series(vol,     window=shannon_window, bins=n_bins)
+    sh_skew = shannon_entropy_series(skew,    window=shannon_window, bins=n_bins)
+    log_lines.append(f"Shannon: finestra {shannon_window}g, {n_bins} bin (√N) + Miller-Madow")
 
     # ── 4. Permutation Entropy rolling ──────────────────────────
-    pe = permutation_entropy_series(log_ret, order=pe_order, window=PE_WINDOW)
+    # La finestra PE segue quella di Shannon (coerenza tra le due misure e con la UI).
+    pe = permutation_entropy_series(log_ret, order=pe_order, window=shannon_window)
 
     # ── 5. Assembla feature DataFrame (solo feature entropiche) ──
     feat = pd.DataFrame({
@@ -555,6 +579,7 @@ def build_features(
         shannon_window=shannon_window,
         pe_order=pe_order,
         regime_min_periods=regime_min_periods,
+        shannon_bins=n_bins,
         regime_p33=regime_p33,
         regime_p67=regime_p67,
         pe_p33=pe_p33,
