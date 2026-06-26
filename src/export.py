@@ -382,7 +382,8 @@ def build_entropy_export(result: EntropyResult) -> dict:
             "n_observations": result.n_feat,
             "parameters": {
                 "shannon_window":  result.shannon_window,
-                "shannon_bins":    10,
+                "shannon_bins":    result.shannon_bins,
+                "shannon_bias_correction": "miller_madow",
                 "pe_order":        result.pe_order,
                 "pe_window":       result.shannon_window,
                 "forward_periods": list(FORWARD_PERIODS.keys()),
