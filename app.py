@@ -15,6 +15,7 @@ Deployment:
 from __future__ import annotations
 
 import json
+import math
 from datetime import date
 
 import pandas as pd
@@ -131,11 +132,20 @@ with st.sidebar:
         )
         pe_order = st.select_slider(
             "Ordine Permutation Entropy (m)",
-            options=[3, 4, 5, 6],
+            options=[3, 4],
             value=PE_ORDER,
-            help="Embedding dimension per la Permutation Entropy. "
-                 "Valori più alti catturano pattern più lunghi ma richiedono più dati.",
+            help="Embedding dimension per la Permutation Entropy. Servono molte più "
+                 "osservazioni dei pattern possibili (m!): m=3→6, m=4→24. "
+                 "Con finestre giornaliere m è limitato a 4: m≥5 (120–720 pattern) "
+                 "darebbe stime di pura varianza campionaria. La finestra PE segue "
+                 "quella della Shannon Entropy.",
         )
+        if shannon_window - pe_order + 1 < 5 * math.factorial(pe_order):
+            st.caption(
+                f"⚠️ Finestra {shannon_window}g corta per m={pe_order} "
+                f"({math.factorial(pe_order)} pattern): PE poco affidabile. "
+                "Aumenta la finestra o riduci m."
+            )
 
     st.divider()
     st.caption("📊 Dati: EODHD Historical Data API")
@@ -500,8 +510,8 @@ with st.expander("🔬 Metodologia, Fondamenti Teorici e Riferimenti"):
     | Log-return | `r_t = ln(P_t / P_{{t-1}})` | Additivi e simmetrici |
     | Volatilità rolling | `σ_t = std(r_{{t-20}}, ..., r_t)` | Finestra 21g ≈ 1 mese |
     | Skewness rolling | `skew_t` rolling 63g | Asimmetria distribuzione locale |
-    | Shannon Entropy | `H(t) = −Σ p_i·log₂(p_i)` | Finestra {shannon_window}g, {10} bin |
-    | Permutation Entropy | `PE(t) = H_perm / log₂(m!)` | m={pe_order}, finestra {shannon_window}g, normalizzata [0,1] |
+    | Shannon Entropy | `H(t) = −Σ p_i·log₂(p_i)` + Miller-Madow | Finestra {shannon_window}g, {result.shannon_bins} bin (√N) |
+    | Permutation Entropy | `PE(t) = H_perm / log₂(m!)` | m={pe_order} (max 4), finestra {shannon_window}g (= Shannon), [0,1] |
     | Forward return | `fwd_N(t) = Σ r_{{t+1..t+N}}` | N ∈ {{21, 63, 126, 252}} |
     | Percentile | `pct(t) = rank(H_t) / rank_max` | Expanding (solo storia passata) |
     | Regime | Tertili P33/P67 **expanding** (point-in-time) | Soglie correnti: {result.regime_p33:.4f} / {result.regime_p67:.4f} — niente look-ahead |
